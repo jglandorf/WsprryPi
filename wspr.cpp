@@ -125,7 +125,7 @@ extern "C" {
 // compensated for in the main loop.
 #define F_PWM_CLK_INIT (31156186.6125761)
 
-// WSRP nominal symbol time
+// WSPR nominal symbol time
 #define WSPR_SYMTIME (8192.0/12000.0)
 // How much random frequency offset should be added to WSPR transmissions
 // if the --offset option has been turned on.
@@ -236,6 +236,276 @@ static struct {
   unsigned pool_cnt;
 } mbox;
 
+
+// //////////////////////////////////////////////////////////////////////////
+int user_gpio = -1;
+// From https://github.com/RPi-Distro/raspi-gpio
+
+#define DRIVE_UNSET -1
+#define DRIVE_LOW    0
+#define DRIVE_HIGH   1
+
+#define PULL_UNSET  -1
+#define PULL_NONE    0
+#define PULL_DOWN    1
+#define PULL_UP      2
+
+#define FUNC_UNSET  -1
+#define FUNC_IP      0
+#define FUNC_OP      1
+#define FUNC_A0      4
+#define FUNC_A1      5
+#define FUNC_A2      6
+#define FUNC_A3      7
+#define FUNC_A4      3
+#define FUNC_A5      2
+
+#define GPIO_MIN     0
+#define GPIO_MAX     53
+
+#define GPSET0    7
+#define GPSET1    8
+#define GPCLR0    10
+#define GPCLR1    11
+#define GPLEV0    13
+#define GPLEV1    14
+#define GPPUD     37
+#define GPPUDCLK0 38
+#define GPPUDCLK1 39
+
+#define GPIO_BASE_OFFSET  0x00200000
+
+/* Pointer to HW */
+static volatile uint32_t *gpio_base = 0;
+  uint32_t hwbase;
+  int fd;
+
+
+void delay_us(uint32_t delay)
+{
+  struct timespec tv_req;
+  struct timespec tv_rem;
+  uint32_t i;
+  uint32_t del_ms, del_us;
+  del_ms = delay / 1000;
+  del_us = delay % 1000;
+  for(i=0; i<=del_ms; i++)
+  {
+    tv_req.tv_sec = 0;
+    if(i==del_ms) tv_req.tv_nsec = del_us*1000;
+    else          tv_req.tv_nsec = 1000000;
+    tv_rem.tv_sec = 0;
+    tv_rem.tv_nsec = 0;
+    nanosleep(&tv_req, &tv_rem);
+    if(tv_rem.tv_sec != 0 || tv_rem.tv_nsec != 0)
+      printf("timer oops!\n");
+  }
+}
+
+uint32_t get_hwbase(void)
+{
+  const char *ranges_file = "/proc/device-tree/soc/ranges";
+  uint8_t ranges[8];
+  FILE *fd;
+  uint32_t ret = 0;
+
+  if ((fd = fopen(ranges_file, "rb")) == NULL)
+  {
+    printf ("Can't open '%s'\n", ranges_file);
+  }
+  else
+  {
+    ret = fread(ranges, 1, sizeof(ranges), fd);
+
+    if (ret  == sizeof(ranges))
+    {
+      ret = (ranges[4] << 24) |
+            (ranges[5] << 16) |
+            (ranges[6] << 8) |
+            (ranges[7] << 0);
+      if ((ranges[0] != 0x7e) ||
+          (ranges[1] != 0x00) ||
+          (ranges[2] != 0x00) ||
+          (ranges[3] != 0x00) ||
+	  ((ret != 0x20000000) && (ret != 0x3f000000)))
+      {
+        printf("Unexpected ranges data (%02x%02x%02x%02x %02x%02x%02x%02x)\n",
+	       ranges[0], ranges[1], ranges[2], ranges[3],
+	       ranges[4], ranges[5], ranges[6], ranges[7]);
+        ret = 0;
+      }
+    }
+    else
+    {
+       printf("Can't read '%s'\n", ranges_file);
+       ret = 0;
+    }
+  }
+
+  fclose(fd);
+
+  return ret;
+}
+
+
+
+// Create the memory map between virtual memory and the GPIO physical memory.
+int setup_gpio_base_virt(
+  volatile unsigned * & gpio_base
+) {
+  /* Check for /dev/gpiomem, else we need root access for /dev/mem */
+  if ((fd = open ("/dev/gpiomem", O_RDWR | O_SYNC | O_CLOEXEC) ) >= 0)
+  {
+    gpio_base = (uint32_t *)mmap(0, BLOCK_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0) ;
+  }
+  else
+  {
+    if (geteuid())
+    {
+      printf("Must be root\n");
+      return 0;
+    }
+
+    hwbase = get_hwbase();
+
+    if(!hwbase)
+      return 1;
+
+    if ((fd = open ("/dev/mem", O_RDWR | O_SYNC | O_CLOEXEC) ) < 0)
+    {
+      printf("Unable to open /dev/mem: %s\n", strerror (errno)) ;
+      return 1;
+    }
+
+    gpio_base = (uint32_t *)mmap(0, BLOCK_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, fd, GPIO_BASE_OFFSET+hwbase);
+  }
+
+  if ((int32_t)gpio_base == -1)
+  {
+    printf("mmap (GPIO) failed: %s\n", strerror (errno)) ;
+    return 1;
+  }
+
+  return 0;
+}
+
+
+/*
+ * type:
+ *   0 = no pull
+ *   1 = pull down
+ *   2 = pull up
+ */
+int gpio_set_pull(int gpio, int type)
+{
+  if(gpio < GPIO_MIN || gpio > GPIO_MAX) return -1;
+  if(type < 0 || type > 2) return -1;
+
+  if(gpio < 32) {
+    *(gpio_base+GPPUD) = type;
+    delay_us(10);
+    *(gpio_base+GPPUDCLK0) = 0x1<<gpio;
+    delay_us(10);
+    *(gpio_base+GPPUD) = 0;
+    delay_us(10);
+    *(gpio_base+GPPUDCLK0) = 0;
+    delay_us(10);
+  } else {
+    gpio -= 32;
+    *(gpio_base+GPPUD) = type;
+    delay_us(10);
+    *(gpio_base+GPPUDCLK1) = 0x1<<gpio;
+    delay_us(10);
+    *(gpio_base+GPPUD) = 0;
+    delay_us(10);
+    *(gpio_base+GPPUDCLK1) = 0;
+    delay_us(10);
+  }
+
+  return 0;
+}
+
+int get_gpio_fsel(int gpio)
+{
+  /* GPIOFSEL0-GPIOFSEL5 with 10 sels per 32 bit reg,
+     3 bits per sel (so bits 0:29 used) */
+  uint32_t reg = gpio / 10;
+  uint32_t sel = gpio % 10;
+  if(gpio < GPIO_MIN || gpio > GPIO_MAX) return -1;
+  /*printf("reg = %d, sel = %d ", reg, sel);*/
+  return (int)((*(gpio_base+reg))>>(3*sel))&0x7;
+}
+
+
+int set_gpio_fsel(int gpio, int fsel)
+{
+  static volatile uint32_t *tmp;
+  uint32_t reg = gpio / 10;
+  uint32_t sel = gpio % 10;
+  uint32_t mask;
+  if(gpio < GPIO_MIN || gpio > GPIO_MAX) return -1;
+  tmp = gpio_base+reg;
+  mask = 0x7<<(3*sel);
+  mask = ~mask;
+  /*printf("reg = %d, sel = %d, mask=%08X\n", reg, sel, mask);*/
+  tmp = gpio_base+reg;
+  *tmp = *tmp & mask;
+  *tmp = *tmp | ((fsel&0x7)<<(3*sel));
+  return (int)((*tmp)>>(3*sel))&0x7;
+}
+
+
+int set_gpio_value(int gpio, int value)
+{
+  if(gpio < GPIO_MIN || gpio > GPIO_MAX) return -1;
+  if(value != 0)
+  {
+    if(gpio < 32) {
+      *(gpio_base+GPSET0) = 0x1<<gpio;
+    }
+    else {
+      gpio -= 32;
+      *(gpio_base+GPSET1) = 0x1<<gpio;
+    }
+  } else
+  {
+    if(gpio < 32) {
+      *(gpio_base+GPCLR0) = 0x1<<gpio;
+    }
+    else {
+      gpio -= 32;
+      *(gpio_base+GPCLR1) = 0x1<<gpio;
+    }
+  }
+  return 0;
+}
+
+int gpio_set(int pinnum, int fsparam, int drive, int pull)
+{
+  /* set function */
+  if(fsparam != FUNC_UNSET)
+    set_gpio_fsel(pinnum, fsparam);
+
+  /* set output value (check pin is output first) */
+  if(drive != DRIVE_UNSET) {
+    if(get_gpio_fsel(pinnum) == 1) {
+      set_gpio_value(pinnum, drive);
+    } else {
+      printf("Can't set pin value, not an output\n");
+      return 1;
+    }
+  }
+
+  /* set pulls */
+  if(pull != PULL_UNSET)
+    return gpio_set_pull(pinnum, pull);
+
+  return 0;
+}
+// end from https://github.com/RPi-Distro/raspi-gpio
+// //////////////////////////////////////////////////////////////////////////
+
+
 // Use the mbox interface to allocate a single chunk of memory to hold
 // all the pages we will need. The bus address and the virtual address
 // are saved in the mbox structure.
@@ -336,13 +606,31 @@ void txon() {
   // Enable clock.
   setupword = {6/*SRC*/, 1, 0, 0, 0, 3,0x5a};
   ACCESS_BUS_ADDR(CM_GP0CTL_BUS) = *((int*)&setupword);
+
+  // Optionally turn on GPIO
+  if (user_gpio >= 0)
+  {
+    if (gpio_set(user_gpio, FUNC_OP, DRIVE_HIGH, PULL_UNSET)) // See https://github.com/RPi-Distro/raspi-gpio
+      ; // printf("  GPIO %d NOT set ok\n", user_gpio);
+    else
+      printf("  GPIO %d set ok\n", user_gpio);
+  }
 }
 
-// Turn transmitter on
+// Turn transmitter off
 void txoff() {
   //struct GPCTL setupword = {6/*SRC*/, 0, 0, 0, 0, 1,0x5a};
   //ACCESS_BUS_ADDR(CM_GP0CTL_BUS) = *((int*)&setupword);
   disable_clock();
+
+  // Optionally turn off GPIO
+  if (user_gpio >= 0)
+  {
+    if (gpio_set(user_gpio, FUNC_OP, DRIVE_LOW, PULL_UNSET)) // See https://github.com/RPi-Distro/raspi-gpio
+      ; //printf("  GPIO %d NOT cleared ok\n", user_gpio);
+    else
+      printf("  GPIO %d cleared ok\n", user_gpio);
+  }
 }
 
 // Transmit symbol sym for tsym seconds.
@@ -743,6 +1031,9 @@ void print_usage() {
   std::cout << "  -n --no-delay" << std::endl;
   std::cout << "    Transmit immediately, do not wait for a WSPR TX window. Used" << std::endl;
   std::cout << "    for testing only." << std::endl;
+  std::cout << "  -g --gpio io_num" << std::endl;
+  std::cout << "    Turn on GPIO #n during transmissions." << std::endl;
+  std::cout << "    Run the command 'pinout' to find the header pin for GPIO #n." << std::endl;
   std::cout << std::endl;
   std::cout << "Frequencies can be specified either as an absolute TX carrier frequency, or" << std::endl;
   std::cout << "using one of the following strings. If a string is used, the transmission" << std::endl;
@@ -769,7 +1060,8 @@ void parse_commandline(
   double & test_tone,
   bool & no_delay,
   mode_type & mode,
-  int & terminate
+  int & terminate,
+  int & gpio
 ) {
   // Default values
   ppm=0;
@@ -780,6 +1072,7 @@ void parse_commandline(
   no_delay=false;
   mode=WSPR;
   terminate=-1;
+  gpio=-1;
 
   static struct option long_options[] = {
     {"help",             no_argument,       0, 'h'},
@@ -791,13 +1084,15 @@ void parse_commandline(
     {"offset",           no_argument,       0, 'o'},
     {"test-tone",        required_argument, 0, 't'},
     {"no-delay",         no_argument,       0, 'n'},
+    {"gpio",             required_argument, 0, 'g'},
     {0, 0, 0, 0}
   };
 
   while (true) {
+    int setup_gpio_ret;
     /* getopt_long stores the option index here. */
     int option_index = 0;
-    int c = getopt_long (argc, argv, "hp:sfrx:ot:n",
+    int c = getopt_long (argc, argv, "hp:sfrx:ot:ng:",
                      long_options, &option_index);
     if (c == -1)
       break;
@@ -854,6 +1149,35 @@ void parse_commandline(
         break;
       case 'n':
         no_delay=true;
+        break;
+      case 'g':
+        gpio=strtol(optarg,&endp,10);
+        if ((optarg==endp)||(*endp!='\0')) {
+          std::cerr << "Error: could not parse gpio argument" << std::endl;
+          ABORT(-1);
+        }
+        // ToDo:  find out specifically which IO pins are on the header.
+        if ((gpio<0) || (gpio>27)) {
+          std::cerr << "Error: gpio parameter must be >= 0 and <= 27.  Also, it may not be GPIO4 (header pin 7)" << std::endl;
+          ABORT(-1);
+        }
+        printf("Setting up GPIO...\n");
+        setup_gpio_ret = setup_gpio_base_virt(gpio_base);
+        printf("  ...returned %d.  GPIO base= %x\n", setup_gpio_ret, (unsigned int)gpio_base);
+        user_gpio = gpio;
+        // Test GPIO
+        if (0)
+        { // See https://github.com/RPi-Distro/raspi-gpio
+          if (gpio_set(gpio, FUNC_OP, DRIVE_HIGH, PULL_UNSET))
+            printf("  GPIO %d NOT set ok\n", gpio);
+          else
+            printf("  GPIO %d set ok\n", gpio);
+          sleep(1);
+	        if (gpio_set(gpio, FUNC_OP, DRIVE_LOW, PULL_UNSET))
+            printf("GPIO %d NOT cleared ok\n", gpio);
+          else
+            printf("GPIO %d cleared ok\n", gpio);
+          }
         break;
       case '?':
         /* getopt_long already printed an error message. */
@@ -988,6 +1312,9 @@ void parse_commandline(
     if (random_offset) {
       temp << "  A small random frequency offset will be added to all transmissions" << std::endl;
     }
+    if (gpio >= 0) {
+      temp << "  GPIO #" << gpio << " will turn on during transmissions" << std::endl;
+    }
     if (temp.str().length()) {
       std::cout << "Extra options:" << std::endl;
       std::cout << temp.str();
@@ -1121,6 +1448,7 @@ int main(const int argc, char * const argv[]) {
   //catch all signals (like ctrl+c, ctrl+z, ...) to ensure DMA is disabled
   for (int i = 0; i < 64; i++) {
     struct sigaction sa;
+
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = cleanupAndExit;
     sigaction(i, &sa, NULL);
@@ -1154,6 +1482,7 @@ int main(const int argc, char * const argv[]) {
   bool no_delay;
   mode_type mode;
   int terminate;
+  int gpio;
   parse_commandline(
     argc,
     argv,
@@ -1168,7 +1497,8 @@ int main(const int argc, char * const argv[]) {
     test_tone,
     no_delay,
     mode,
-    terminate
+    terminate,
+    gpio
   );
   int nbands=center_freq_set.size();
 
@@ -1344,4 +1674,3 @@ int main(const int argc, char * const argv[]) {
 
   return 0;
 }
-

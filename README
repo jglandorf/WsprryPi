@@ -20,7 +20,8 @@ Installation / update:
 ******
   Download and compile code:
     sudo apt-get install git
-    git clone https://github.com/JamesP6000/WsprryPi.git
+   #git clone https://github.com/JamesP6000/WsprryPi.git
+    git clone https://github.com/jglandorf/WsprryPi.git
     cd WsprryPi
     make
 
@@ -70,6 +71,9 @@ Usage: (WSPR --help output):
     -n --no-delay
       Transmit immediately, do not wait for a WSPR TX window. Used
       for testing only.
+     -g --gpio io_num
+     Turn on GPIO #n during transmissions.
+     Run the command 'pinout' to find the header pin for GPIO #n.
 
   Frequencies can be specified either as an absolute TX carrier frequency, or
   using one of the following strings. If a string is used, the transmission
@@ -94,7 +98,7 @@ Radio licensing / RF:
   are found on header P1 pin 7 and 9 respectively, the pin closest to P1 label
   is pin 1 and its 3rd and 4th neighbour is pin 7 and 9 respectively. See this
   link for pin layout: http://elinux.org/RPi_Low-level_peripherals
-  
+
   Examples of low-pass filters can be found here:
     http://www.gqrp.com/harmonic_filters.pdf
   TAPR makes a very nice shield for the Raspberry Pi that is pre-assembled,
@@ -189,27 +193,35 @@ PWM Peripheral:
 Example usage:
 ******
   Brief help screen
-    ./wspr --help
+    `./wspr --help`
 
   Transmit a constant test tone at 780 kHz.
-    sudo ./wspr --test-tone 780e3
+    `sudo ./wspr --test-tone 780e3`
 
   Using callsign N9NNN, locator EM10, and TX power 33 dBm, transmit a single
   WSPR transmission on the 20m band using NTP based frequency offset
   calibration.
-    sudo ./wspr N9NNN EM10 33 20m
+    `sudo ./wspr N9NNN EM10 33 20m`
 
   The same as above, but without NTP calibration:
-    sudo ./wspr --free-running N9NNN EM10 33 20m
+    `sudo ./wspr --free-running N9NNN EM10 33 20m`
 
   Transmit a WSPR transmission slightly off-center on 30m every 10 minutes for
   a total of 7 transmissions, and using a fixed PPM correction value.
-    sudo ./wspr --repeat --terminate 7 --ppm 43.17 N9NNN EM10 33 10140210 0 0 0 0
+    `sudo ./wspr --repeat --terminate 7 --ppm 43.17 N9NNN EM10 33 10140210 0 0 0 0`
 
   Transmit repeatedly on 40m, use NTP based frequency offset calibration,
   and add a random frequency offset to each transmission to minimize collisions
   with other transmitters.
-    sudo ./wspr --repeat --offset --self-calibration N9NNN EM10 33 40m
+    `sudo ./wspr --repeat --offset --self-calibration N9NNN EM10 33 40m`
+
+  Transmit repeatedly on 40m, use NTP based frequency offset calibration,
+  add a random frequency offset to each transmission to minimize collisions
+  with other transmitters, and turn on GPIO27 (header pin 13) during transmission.
+  You may connect an LED to indicate transmit status as follows:
+  header_pi_13 --- --/\/\/-- --- --|>|-- --- header_pi_14
+      GPIO27        330ohm       A LED K          GND
+    `sudo ./wspr --repeat --offset --self-calibration -gpio 27 N9NNN EM10 33 40m`
 
 ******
 Reference documentation:
@@ -248,12 +260,17 @@ Credits:
   Retzler András (HA7ILM) for the massive changes that were required to
   incorporate the mailbox code so that the RPi2 and RPi3 could be supported.
 
+  Joe AC8ES added capability to turn an output on during transmission.
+
   [1] PiFM code from
       http://www.icrobotics.co.uk/wiki/index.php/Turning_the_Raspberry_Pi_Into_an_FM_Transmitter
   [2] Original WSPR Pi transmitter code by Dan:
       https://github.com/DanAnkers/WsprryPi
   [3] Fork created by Guido:
       https://github.com/threeme3/WsprryPi
-  [4] This fork created by James:
+  [4] Fork created by James:
       https://github.com/JamesP6000/WsprryPi
-
+  [5] This fork created by AC8ES:
+      https://github.com/jglandorf/WsprryPi.git
+      IO code is based on:
+      https://github.com/RPi-Distro/raspi-gpio.git
